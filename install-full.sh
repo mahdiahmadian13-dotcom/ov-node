@@ -224,42 +224,61 @@ setup_auth_scripts() {
     # Copy auth script
     cat > "$AUTH_SCRIPT" << 'AUTHEOF'
 #!/bin/bash
-# OpenVPN auth-user-pass-verify script
-# Verifies username/password against /etc/openvpn/passwd
+# OpenVPN auth-user-pass-verify (via-file mode)
+# OpenVPN passes temp file as $1: line1=username, remaining lines=password
+# NOTE: in via-file mode, $username env IS set but $password is NOT - so we
+# ALWAYS read from the file when available.
 
 PASSWORD_FILE="/etc/openvpn/passwd"
+LOG="${AUTH_DEBUG_LOG:-}"  # set AUTH_DEBUG_LOG=/path to enable debugging
 
-# Check if password file exists
-if [ ! -f "$PASSWORD_FILE" ]; then
-    echo "Password file not found" >&2
-    exit 1
+[ -n "$LOG" ] && echo "args=[$@]" >> $LOG
+
+USERNAME=""
+PASSWORD=""
+
+if [ -n "$1" ] && [ -f "$1" ]; then
+    USERNAME=$(head -n 1 "$1")
+    PASSWORD=$(tail -n +2 "$1")
+    # strip trailing newline artifacts
+    PASSWORD="${PASSWORD%$'\n'}"
 fi
 
-# Get username and password from environment variables
-USERNAME="$username"
-PASSWORD="$password"
-
-# If not set via env, try reading from files (via-file mode)
-if [ -z "$USERNAME" ] && [ -f "$1" ]; then
-    USERNAME=$(head -1 "$1")
-    PASSWORD=$(tail -1 "$1")
+# fallback to env (via-env mode)
+if [ -z "$USERNAME" ]; then
+    USERNAME="$username"
+fi
+if [ -z "$PASSWORD" ]; then
+    PASSWORD="$password"
 fi
 
-# Validate inputs
+[ -n "$LOG" ] && echo "U=[$USERNAME] P_len=[${#PASSWORD}]" >> $LOG
+
 if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
-    echo "Username or password not provided" >&2
     exit 1
 fi
 
-# Check credentials
-while IFS=: read -r stored_user stored_pass; do
-    if [ "$USERNAME" = "$stored_user" ] && [ "$PASSWORD" = "$stored_pass" ]; then
-        exit 0
-    fi
+found=0
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    case "$line" in
+        "#"*) continue ;;
+    esac
+    su="${line%%:*}"
+    sp="${line#*:}"
+    [ -z "$su" ] && continue
+    [ "$PASSWORD" = "$sp" ] || continue
+    if [ "$USERNAME" = "$su" ]; then found=1; break; fi
+    case "$su" in
+        "$USERNAME"-*) found=1; break ;;
+    esac
 done < "$PASSWORD_FILE"
 
-# Credentials don't match
+[ -n "$LOG" ] && echo "found=$found" >> $LOG
+
+[ "$found" = "1" ] && exit 0
 exit 1
+
 AUTHEOF
 
     chmod +x "$AUTH_SCRIPT"
@@ -412,7 +431,7 @@ with open(conf_path) as f:
 
 hooks = []
 if "auth-user-pass-verify" not in conf:
-    hooks.append("auth-user-pass-verify /etc/openvpn/auth.sh via-env")
+    hooks.append("auth-user-pass-verify /etc/openvpn/auth.sh via-file")
 if "client-connect /etc/openvpn/client-connect.sh" not in conf:
     hooks.append("client-connect /etc/openvpn/client-connect.sh")
 if "script-security 2" not in conf:
@@ -437,6 +456,13 @@ PYEOF
     # Enable ip_forward (Nyr does this too, but be safe)
     echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn-forward.conf
     sysctl --system >/dev/null 2>&1 || true
+
+    # Status log must be readable by the OpenVPN daemon user (nobody)
+    # so client-connect.sh can count active connections
+    mkdir -p /etc/systemd/system/openvpn-server@server.service.d
+    printf '[Service]\nExecStartPost=/bin/chmod 644 /var/log/openvpn-status.log\n' \
+        > /etc/systemd/system/openvpn-server@server.service.d/override.conf
+    systemctl daemon-reload
 
     # Restart OpenVPN to load hooks (try known unit names)
     systemctl daemon-reload
