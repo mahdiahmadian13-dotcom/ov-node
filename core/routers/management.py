@@ -42,7 +42,7 @@ async def update_node(api_key: str = Depends(check_api_key)):
         # Try to create the script if it doesn't exist
         try:
             import urllib.request
-            url = "https://raw.githubusercontent.com/primeZdev/ov-node/main/scripts/update.sh"
+            url = "https://raw.githubusercontent.com/mahdiahmadian13-dotcom/ov-node/main/scripts/update.sh"
             urllib.request.urlretrieve(url, script_path)
             os.chmod(script_path, 0o755)
         except Exception as e:
@@ -167,7 +167,7 @@ async def check_for_updates(api_key: str = Depends(check_api_key)):
         ).stdout.strip()
 
         # Fetch latest commit from GitHub API
-        url = "https://api.github.com/repos/primeZdev/ov-node/commits/main"
+        url = "https://api.github.com/repos/mahdiahmadian13-dotcom/ov-node/commits/main"
         req = urllib.request.Request(url, headers={"User-Agent": "OV-Node"})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read())

@@ -20,7 +20,7 @@ CONNECT_SCRIPT="${OPENVPN_DIR}/client-connect.sh"
 PASSWORD_FILE="${OPENVPN_DIR}/passwd"
 MAX_DEVICES_FILE="${OPENVPN_DIR}/max_devices.json"
 STATUS_FILE="/var/log/openvpn-status.log"
-REPO_URL="https://github.com/primeZdev/ov-node"
+REPO_URL="https://github.com/mahdiahmadian13-dotcom/ov-node"
 
 #=============================================================
 # Helper Functions

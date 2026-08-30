@@ -6,7 +6,7 @@
 
 set -e
 
-REPO_URL="https://github.com/primeZdev/ov-node"
+REPO_URL="https://github.com/mahdiahmadian13-dotcom/ov-node"
 INSTALL_DIR="/opt/ov-node"
 BRANCH="main"
 
