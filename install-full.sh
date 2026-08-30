@@ -76,7 +76,7 @@ install_dependencies() {
         iptables \
         net-tools \
         psmisc \
-        pexpect
+        
 
     log_info "Dependencies installed"
 }
@@ -121,10 +121,10 @@ setup_openvpn_server() {
         wget -4 -q https://raw.githubusercontent.com/Nyr/openvpn-install/master/openvpn-install.sh -O /root/openvpn-install.sh
     chmod +x /root/openvpn-install.sh
 
-    # Drive the installer non-interactively with pexpect (same prompts as ov-node installer.py)
+    # Drive the installer non-interactively with  (same prompts as ov-node installer.py)
     log_info "Running Nyr installer (this takes a few minutes)..."
     python3 << 'PYEOF'
-import pexpect, sys
+import , sys
 
 prompts = [
     (r"Which IPv4 address should be used.*:", "1"),
@@ -135,14 +135,14 @@ prompts = [
     (r"Press any key to continue...", ""),
 ]
 
-bash = pexpect.spawn("/usr/bin/bash", ["/root/openvpn-install.sh"], encoding="utf-8", timeout=300)
+bash = .spawn("/usr/bin/bash", ["/root/openvpn-install.sh"], encoding="utf-8", timeout=300)
 for pattern, reply in prompts:
     try:
         bash.expect(pattern, timeout=15)
         bash.sendline(reply)
-    except pexpect.TIMEOUT:
+    except .TIMEOUT:
         print(f"[warn] prompt not seen: {pattern}", file=sys.stderr)
-bash.expect(pexpect.EOF, timeout=300)
+bash.expect(.EOF, timeout=300)
 bash.close()
 print("Nyr installer finished")
 PYEOF
@@ -182,7 +182,7 @@ setup_ovnode() {
     else
         python3 -m venv .venv
         source .venv/bin/activate
-        pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn psutil pydantic-settings pexpect requests
+        pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn psutil pydantic-settings  requests
     fi
 
     # Generate API key
