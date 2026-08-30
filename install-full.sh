@@ -178,12 +178,22 @@ setup_ovnode() {
 
     # Install Python dependencies
     log_info "Installing Python dependencies..."
+    RUNTIME_DEPS="fastapi uvicorn psutil pydantic-settings python-dotenv colorama pexpect requests"
     if command -v uv &> /dev/null; then
         uv sync
-    else
+    elif [ ! -d .venv ]; then
         python3 -m venv .venv
-        source .venv/bin/activate
-        pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn psutil pydantic-settings  requests
+        .venv/bin/pip install --upgrade pip -q
+        .venv/bin/pip install $RUNTIME_DEPS -q
+    else
+        .venv/bin/pip install --upgrade pip -q
+        .venv/bin/pip install $RUNTIME_DEPS -q
+    fi
+
+    # Sanity check: all critical imports must succeed in the venv
+    if ! .venv/bin/python -c "import fastapi, uvicorn, psutil, pydantic_settings, pexpect, requests, colorama" 2>/dev/null; then
+        log_error "Python dependencies broken in venv - installing system-wide fallback"
+        pip3 install $RUNTIME_DEPS -q
     fi
 
     # Generate API key
