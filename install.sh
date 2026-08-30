@@ -1,54 +1,102 @@
 #!/bin/bash
+#=============================================================
+# OV-Node Quick Installer
+# One-line install: bash <(curl -s https://raw.githubusercontent.com/primeZdev/ov-node/main/install.sh)
+#=============================================================
+
 set -e
 
-APP_NAME="ov-node"
-INSTALL_DIR="/opt/$APP_NAME"
 REPO_URL="https://github.com/primeZdev/ov-node"
-PYTHON="/usr/bin/python3"
+INSTALL_DIR="/opt/ov-node"
+BRANCH="main"
 
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-NC="\033[0m"
+echo "╔═══════════════════════════════════════════════════════════╗"
+echo "║              OV-Node Quick Installer                      ║"
+echo "╚═══════════════════════════════════════════════════════════╝"
+echo ""
 
-echo -e "${YELLOW}Updating system...${NC}"
+# Check root
+if [ "$EUID" -ne 0 ]; then
+    echo "[✗] Please run as root"
+    exit 1
+fi
+
+# Install dependencies
+echo "[→] Installing dependencies..."
 apt update -y
-apt install -y python3 python3-full python3-venv wget curl git
+apt install -y python3 python3-pip python3-venv wget curl git pexpect
 
-echo -e "${YELLOW}Installing uv...${NC}"
-wget -qO- https://astral.sh/uv/uv/install.sh | sh
-
-export PATH="$HOME/.local/bin:$PATH"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-
+# Install uv if not present
 if ! command -v uv &> /dev/null; then
-    echo -e "${YELLOW}uv not found in PATH, trying alternative installation...${NC}"
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    echo "[→] Installing uv..."
+    wget -qO- https://astral.sh/uv/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# Download repo release
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo -e "${YELLOW}Downloading latest release...${NC}"
-
-    LATEST_URL=$(curl -s https://api.github.com/repos/primeZdev/ov-node/releases/latest \
-        | grep "tarball_url" \
-        | cut -d '"' -f 4)
-
-    mkdir -p "$INSTALL_DIR"
-    cd /tmp
-
-    wget -O latest.tar.gz "$LATEST_URL"
-
-    echo -e "${YELLOW}Extracting...${NC}"
-    tar -xzf latest.tar.gz -C "$INSTALL_DIR" --strip-components=1
-    rm -f latest.tar.gz
+# Clone or update repository
+if [ -d "$INSTALL_DIR/.git" ]; then
+    echo "[→] Updating OV-Node..."
+    cd "$INSTALL_DIR"
+    git pull
 else
-    echo -e "${GREEN}Directory exists, skipping download.${NC}"
+    echo "[→] Cloning OV-Node..."
+    git clone -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
 fi
 
-cd "$INSTALL_DIR"
-
-echo -e "${YELLOW}Installing dependencies...${NC}"
+# Install Python dependencies
+echo "[→] Installing Python dependencies..."
 uv sync
 
-uv run python installer.py
+# Generate API key
+API_KEY=$(openssl rand -hex 32)
+
+# Create .env file
+cat > "${INSTALL_DIR}/.env" << EOF
+SERVICE_PORT=9090
+API_KEY=${API_KEY}
+DEBUG=WARNING
+DOC=False
+EOF
+
+# Create systemd service
+PYTHON_PATH="${INSTALL_DIR}/.venv/bin/python"
+
+cat > /etc/systemd/system/ov-node.service << EOF
+[Unit]
+Description=OV-Node Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${INSTALL_DIR}
+Environment="PATH=${INSTALL_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=${PYTHON_PATH} -m uvicorn main:app --host 0.0.0.0 --port 9090
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Reload and start
+systemctl daemon-reload
+systemctl enable ov-node
+systemctl start ov-node
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════════╗"
+echo "║           Installation Complete!                          ║"
+echo "╚═══════════════════════════════════════════════════════════╝"
+echo ""
+echo "Connection Information:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Node Address:  $(curl -s ifconfig.me):9090"
+echo "  API Key:       ${API_KEY}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Useful Commands:"
+echo "  systemctl status ov-node    # Check status"
+echo "  journalctl -u ov-node -f    # View logs"
+echo ""
