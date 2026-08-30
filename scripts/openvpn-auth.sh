@@ -1,27 +1,33 @@
 #!/bin/bash
-# OpenVPN auth-user-pass-verify script
-# Verifies username/password against /etc/openvpn/passwd
-#
-# Accepts BOTH:
-#   - full node username:  ali-hosdtvds1
-#   - base username:       ali  (matches ali-*)
-#
-# Password file format:  username:password  (password may contain ':')
+# OpenVPN auth-user-pass-verify (via-file mode)
+# OpenVPN passes temp file as $1: line1=username, remaining lines=password
+# NOTE: in via-file mode, $username env IS set but $password is NOT - so we
+# ALWAYS read from the file when available.
 
 PASSWORD_FILE="/etc/openvpn/passwd"
+LOG="${AUTH_DEBUG_LOG:-}"  # set AUTH_DEBUG_LOG=/path to enable debugging
 
-if [ ! -f "$PASSWORD_FILE" ]; then
-    exit 1
+[ -n "$LOG" ] && echo "args=[$@]" >> $LOG
+
+USERNAME=""
+PASSWORD=""
+
+if [ -n "$1" ] && [ -f "$1" ]; then
+    USERNAME=$(head -n 1 "$1")
+    PASSWORD=$(tail -n +2 "$1")
+    # strip trailing newline artifacts
+    PASSWORD="${PASSWORD%$'\n'}"
 fi
 
-USERNAME="$username"
-PASSWORD="$password"
-
-# via-file fallback
-if [ -z "$USERNAME" ] && [ -f "$1" ]; then
-    USERNAME=$(head -1 "$1")
-    PASSWORD=$(tail -1 "$1")
+# fallback to env (via-env mode)
+if [ -z "$USERNAME" ]; then
+    USERNAME="$username"
 fi
+if [ -z "$PASSWORD" ]; then
+    PASSWORD="$password"
+fi
+
+[ -n "$LOG" ] && echo "U=[$USERNAME] P_len=[${#PASSWORD}]" >> $LOG
 
 if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
     exit 1
@@ -31,32 +37,19 @@ found=0
 while IFS= read -r line; do
     [ -z "$line" ] && continue
     case "$line" in
-        \#*) continue ;;
+        "#"*) continue ;;
     esac
-    stored_user="${line%%:*}"
-    stored_pass="${line#*:}"
-    [ -z "$stored_user" ] && continue
-
-    # password must match first
-    [ "$PASSWORD" = "$stored_pass" ] || continue
-
-    # exact match (client typed full name incl. node suffix)
-    if [ "$USERNAME" = "$stored_user" ]; then
-        found=1
-        break
-    fi
-
-    # base-name match (client typed name without -nodesuffix)
-    case "$stored_user" in
-        "$USERNAME"-*)
-            found=1
-            break
-            ;;
+    su="${line%%:*}"
+    sp="${line#*:}"
+    [ -z "$su" ] && continue
+    [ "$PASSWORD" = "$sp" ] || continue
+    if [ "$USERNAME" = "$su" ]; then found=1; break; fi
+    case "$su" in
+        "$USERNAME"-*) found=1; break ;;
     esac
 done < "$PASSWORD_FILE"
 
-if [ "$found" = "1" ]; then
-    exit 0
-fi
+[ -n "$LOG" ] && echo "found=$found" >> $LOG
 
+[ "$found" = "1" ] && exit 0
 exit 1
