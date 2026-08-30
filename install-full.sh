@@ -319,6 +319,9 @@ CONNECTEOF
         echo '{}' > "$MAX_DEVICES_FILE"
     fi
 
+    # Create CCD directory (required by client-config-dir hook)
+    mkdir -p /etc/openvpn/ccd
+
     log_info "Auth scripts configured"
 }
 
@@ -391,6 +394,8 @@ if "status /var/log/openvpn-status.log" not in conf:
     hooks.append("status /var/log/openvpn-status.log 10")
 if "client-config-dir" not in conf:
     hooks.append("client-config-dir /etc/openvpn/ccd")
+if "data-ciphers-fallback" not in conf:
+    hooks.append("data-ciphers-fallback AES-128-GCM")
 
 if hooks:
     with open(conf_path, "a") as f:
