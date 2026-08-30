@@ -328,12 +328,15 @@ CONNECTEOF
 setup_systemd() {
     log_step "Setting up systemd service..."
 
-    # Determine Python path
+    # Determine how to launch: prefer venv python, then uv, then system python
     if [ -f "${OVNODE_DIR}/.venv/bin/python" ]; then
-        PYTHON_PATH="${OVNODE_DIR}/.venv/bin/python"
+        EXEC_START="${OVNODE_DIR}/.venv/bin/python main.py"
+    elif command -v uv &> /dev/null; then
+        EXEC_START="/root/.local/bin/uv run main.py"
     else
-        PYTHON_PATH=$(which python3)
+        EXEC_START="$(which python3) main.py"
     fi
+    log_info "Service exec: $EXEC_START"
 
     # Create systemd service
     cat > /etc/systemd/system/ov-node.service << EOF
@@ -347,7 +350,7 @@ Type=simple
 User=root
 WorkingDirectory=${OVNODE_DIR}
 Environment="PATH=/root/.local/bin:${OVNODE_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=/root/.local/bin/uv run main.py
+ExecStart=${EXEC_START}
 Restart=always
 RestartSec=5
 
@@ -401,9 +404,14 @@ PYEOF
     echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn-forward.conf
     sysctl --system >/dev/null 2>&1 || true
 
-    # Restart OpenVPN to load hooks
+    # Restart OpenVPN to load hooks (try known unit names)
+    systemctl daemon-reload
     systemctl restart openvpn-server@server 2>/dev/null || \
-        systemctl restart openvpn-server 2>/dev/null || true
+        systemctl restart openvpn@server 2>/dev/null || \
+        systemctl restart openvpn 2>/dev/null || true
+
+    sleep 2
+    systemctl status openvpn-server@server --no-pager 2>/dev/null | head -5 || true
 
     log_info "OV-Node hooks installed"
 }
@@ -416,11 +424,19 @@ verify_installation() {
 
     ERRORS=0
 
-    # Check OpenVPN
-    if systemctl is-active --quiet openvpn-server@server; then
-        log_info "OpenVPN server is running"
+    # Check OpenVPN (try known unit names)
+    OVPN_UNIT=""
+    for unit in openvpn-server@server openvpn-server@server.service openvpn@server; do
+        if systemctl list-unit-files | grep -q "^${unit%%.service}"; then
+            OVPN_UNIT="${unit%%.service}"
+            break
+        fi
+    done
+    if [ -n "$OVPN_UNIT" ] && systemctl is-active --quiet "$OVPN_UNIT"; then
+        log_info "OpenVPN server is running ($OVPN_UNIT)"
     else
         log_error "OpenVPN server is not running"
+        [ -n "$OVPN_UNIT" ] && journalctl -u "$OVPN_UNIT" -n 10 --no-pager 2>/dev/null | tail -5
         ERRORS=$((ERRORS + 1))
     fi
 
@@ -429,6 +445,7 @@ verify_installation() {
         log_info "OV-Node service is running"
     else
         log_error "OV-Node service is not running"
+        journalctl -u ov-node -n 10 --no-pager 2>/dev/null | tail -5
         ERRORS=$((ERRORS + 1))
     fi
 
