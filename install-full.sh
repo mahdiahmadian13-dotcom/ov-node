@@ -76,6 +76,7 @@ install_dependencies() {
         iptables \
         net-tools \
         psmisc \
+        python3-pexpect \
         
 
     log_info "Dependencies installed"
@@ -124,7 +125,7 @@ setup_openvpn_server() {
     # Drive the installer non-interactively with  (same prompts as ov-node installer.py)
     log_info "Running Nyr installer (this takes a few minutes)..."
     python3 << 'PYEOF'
-import , sys
+import pexpect, sys
 
 prompts = [
     (r"Which IPv4 address should be used.*:", "1"),
@@ -135,14 +136,14 @@ prompts = [
     (r"Press any key to continue...", ""),
 ]
 
-bash = .spawn("/usr/bin/bash", ["/root/openvpn-install.sh"], encoding="utf-8", timeout=300)
+bash = pexpect.spawn("/usr/bin/bash", ["/root/openvpn-install.sh"], encoding="utf-8", timeout=300)
 for pattern, reply in prompts:
     try:
         bash.expect(pattern, timeout=15)
         bash.sendline(reply)
-    except .TIMEOUT:
+    except pexpect.TIMEOUT:
         print(f"[warn] prompt not seen: {pattern}", file=sys.stderr)
-bash.expect(.EOF, timeout=300)
+bash.expect(pexpect.EOF, timeout=300)
 bash.close()
 print("Nyr installer finished")
 PYEOF
