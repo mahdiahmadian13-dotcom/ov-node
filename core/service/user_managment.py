@@ -148,6 +148,21 @@ def get_max_devices_config(name: str) -> int:
         return 1
 
 
+def update_user_on_server(name: str, password: str = "", max_devices: int = None) -> bool:
+    """Update an existing user's password and/or max_devices without recreating"""
+    try:
+        if password:
+            set_user_password(name, password)
+            # Ensure the .ovpn file has auth-user-pass
+            add_auth_to_ovpn(name)
+        if max_devices is not None:
+            save_max_devices_config(name, max_devices)
+        return True
+    except Exception as e:
+        logger.error(f"Error updating user '{name}': {e}")
+        return False
+
+
 def add_auth_to_ovpn(name: str) -> bool:
     """Add auth-user-pass directive to .ovpn file"""
     try:
@@ -180,35 +195,25 @@ def add_auth_to_ovpn(name: str) -> bool:
 
 
 def get_active_connections() -> dict:
-    """Get active connections per user from OpenVPN status log"""
+    """Get active connections per user from OpenVPN status log
+
+    Counts each connected client row as one active connection and
+    groups them by base username (stripping the -nodename suffix).
+    """
     connections = {}
     try:
-        status_file = "/var/log/openvpn-status.log"
-        if not os.path.exists(status_file):
-            return connections
+        clients = _parse_status_file()
+        for client in clients:
+            username = client["common_name"]
+            if not username:
+                continue
+            # Username format: name-nodename
+            if "-" in username:
+                name = username.rsplit("-", 1)[0]
+            else:
+                name = username
 
-        with open(status_file, "r") as f:
-            lines = f.readlines()
-
-        for line in lines:
-            line = line.strip()
-            if line.startswith("CLIENT_LIST") and not line.startswith(
-                "CLIENT_LIST,Common Name"
-            ):
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    username = parts[1]
-                    # Username format: name-nodename
-                    # We need to extract just the name part
-                    if "-" in username:
-                        name = username.rsplit("-", 1)[0]
-                    else:
-                        name = username
-
-                    if name in connections:
-                        connections[name] += 1
-                    else:
-                        connections[name] = 1
+            connections[name] = connections.get(name, 0) + 1
 
         return connections
     except Exception as e:
@@ -219,8 +224,18 @@ def get_active_connections() -> dict:
 def check_and_enforce_device_limit(name: str, max_devices: int) -> bool:
     """Check if user has exceeded device limit and disconnect excess"""
     try:
-        connections = get_active_connections()
-        active = connections.get(name, 0)
+        clients = _parse_status_file()
+
+        # Exact match on base name to avoid substring collisions
+        # (e.g. 'alice' must not match 'alice2-node1')
+        user_connections = []
+        for client in clients:
+            username = client["common_name"]
+            base_name = username.rsplit("-", 1)[0] if "-" in username else username
+            if base_name == name:
+                user_connections.append(client)
+
+        active = len(user_connections)
 
         if active <= max_devices:
             return True
@@ -230,43 +245,10 @@ def check_and_enforce_device_limit(name: str, max_devices: int) -> bool:
             f"User '{name}' has {active} connections, max is {max_devices}. Disconnecting excess."
         )
 
-        # Get list of active connections for this user
-        status_file = "/var/log/openvpn-status.log"
-        if not os.path.exists(status_file):
-            return False
-
-        user_connections = []
-        with open(status_file, "r") as f:
-            lines = f.readlines()
-
-        for line in lines:
-            line = line.strip()
-            if line.startswith("CLIENT_LIST") and not line.startswith(
-                "CLIENT_LIST,Common Name"
-            ):
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    username = parts[1]
-                    if "-" in username:
-                        base_name = username.rsplit("-", 1)[0]
-                    else:
-                        base_name = username
-
-                    if base_name == name:
-                        user_connections.append(
-                            {
-                                "common_name": username,
-                                "real_address": parts[2] if len(parts) > 2 else "",
-                                "connected_since": parts[4] if len(parts) > 4 else "",
-                            }
-                        )
-
-        # Disconnect excess connections (keep the most recent ones)
-        # Sort by connected_since (most recent first)
-        user_connections.sort(key=lambda x: x.get("connected_since", ""), reverse=True)
-
-        # Disconnect oldest connections
-        to_disconnect = user_connections[max_devices:]
+        # Disconnect the OLDEST connections (keep the most recent ones).
+        # The section/CSV 'Connected Since' string is not reliably sortable,
+        # so we simply drop the first N rows until within the limit.
+        to_disconnect = user_connections[: active - max_devices]
         for conn in to_disconnect:
             disconnect_client(conn["common_name"])
 
@@ -487,23 +469,123 @@ async def download_ovpn_file(name: str) -> str | None:
         return await download_ovpn_file(name)
 
 
-def get_users_usage() -> UsersUsage | None:
-    users = {}
-    file_path = "/var/log/openvpn-status.log"
-    with open(file_path) as f:
-        lines = f.readlines()
+def _parse_status_file():
+    """Parse OpenVPN status log supporting all status formats.
 
-    for line in lines:
-        line = line.strip()
-        if line.startswith("CLIENT_LIST") and not line.startswith(
-            "CLIENT_LIST,Common Name"
-        ):
-            parts = line.split(",")
-            username = parts[1]
-            bytes_received = int(parts[5])
-            bytes_sent = int(parts[6])
-            total_bytes = bytes_received + bytes_sent
-            users[username] = total_bytes
+    Handles:
+      - status-version 1 (default): section format
+        'Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since'
+      - status-version 2: CSV rows prefixed with CLIENT_LIST
+        'CLIENT_LIST,CN,RealAddr,VirtualAddr,BytesReceived,BytesSent,...'
+      - status-version 3/4: JSON
+
+    Returns a list of dicts:
+      {common_name, bytes_received, bytes_sent}
+    """
+    status_file = "/var/log/openvpn-status.log"
+    clients = []
+    try:
+        if not os.path.exists(status_file):
+            logger.warning("Status file not found: %s", status_file)
+            return clients
+
+        with open(status_file, "r") as f:
+            content = f.read()
+
+        if not content.strip():
+            return clients
+
+        # ---- JSON format (status-version 3/4) ----
+        stripped = content.lstrip()
+        if stripped.startswith("{"):
+            try:
+                data = json.loads(content)
+                client_list = data.get("client_list", [])
+                for entry in client_list:
+                    clients.append(
+                        {
+                            "common_name": entry.get("common_name", ""),
+                            "bytes_received": int(entry.get("bytes_received", 0) or 0),
+                            "bytes_sent": int(entry.get("bytes_sent", 0) or 0),
+                        }
+                    )
+                return clients
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                logger.error("Failed to parse JSON status file: %s", e)
+                return clients
+
+        lines = [l.strip() for l in content.splitlines() if l.strip()]
+
+        # ---- CSV format v2 (CLIENT_LIST prefix) ----
+        client_list_rows = [l for l in lines if l.startswith("CLIENT_LIST,")]
+        if client_list_rows:
+            for line in client_list_rows:
+                parts = line.split(",")
+                if len(parts) < 6 or parts[1] == "Common Name":
+                    continue
+                try:
+                    clients.append(
+                        {
+                            "common_name": parts[1],
+                            "bytes_received": int(parts[4]),
+                            "bytes_sent": int(parts[5]),
+                        }
+                    )
+                except ValueError:
+                    continue
+            return clients
+
+        # ---- Section format v1 (default): after header row ----
+        header_idx = None
+        for i, line in enumerate(lines):
+            if line.lower().startswith("common name,real address"):
+                header_idx = i
+                break
+        if header_idx is None:
+            # v1 may have no 'Common Name' header if empty; find CLIENT LIST section
+            for i, line in enumerate(lines):
+                if line.lower().startswith("openvpn client list"):
+                    header_idx = i
+                    break
+
+        if header_idx is not None:
+            in_routing = False
+            for line in lines[header_idx + 1:]:
+                low = line.lower()
+                if low.startswith("routing table") or low.startswith("global stats") or low == "end":
+                    in_routing = True
+                    continue
+                if in_routing:
+                    continue
+                parts = line.split(",")
+                # Section format: Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since
+                if len(parts) >= 4 and not low.startswith("updated"):
+                    try:
+                        clients.append(
+                            {
+                                "common_name": parts[0],
+                                "bytes_received": int(parts[2]),
+                                "bytes_sent": int(parts[3]),
+                            }
+                        )
+                    except ValueError:
+                        continue
+
+        return clients
+    except Exception as e:
+        logger.error("Error parsing status file: %s", e)
+        return clients
+
+
+def get_users_usage() -> UsersUsage | None:
+    """Get per-user traffic usage from the OpenVPN status log"""
+    clients = _parse_status_file()
+    users = {}
+    for client in clients:
+        username = client["common_name"]
+        total_bytes = client["bytes_received"] + client["bytes_sent"]
+        # Accumulate if the same user appears multiple times
+        users[username] = users.get(username, 0) + total_bytes
 
     if users:
         return UsersUsage(users=users)

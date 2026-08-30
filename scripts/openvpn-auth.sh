@@ -35,11 +35,24 @@ if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
 fi
 
 # Check credentials
-while IFS=: read -r stored_user stored_pass; do
+# Split stored lines on the FIRST colon only, so passwords may contain ':'
+found=0
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    case "$line" in
+        \#*) continue ;;
+    esac
+    stored_user="${line%%:*}"
+    stored_pass="${line#*:}"
     if [ "$USERNAME" = "$stored_user" ] && [ "$PASSWORD" = "$stored_pass" ]; then
-        exit 0
+        found=1
+        break
     fi
 done < "$PASSWORD_FILE"
+
+if [ "$found" = "1" ]; then
+    exit 0
+fi
 
 # Credentials don't match
 exit 1

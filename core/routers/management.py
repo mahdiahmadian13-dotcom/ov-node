@@ -122,17 +122,27 @@ def run_uninstall(script_path: str, args: list):
 async def get_version(api_key: str = Depends(check_api_key)):
     """Get current OV-Node version"""
     try:
-        import git
-        repo = git.Repo("/opt/ov-node")
-        commit = repo.head.commit
+        import subprocess as sp
+
+        def git_cmd(*args):
+            return sp.run(
+                ["git", "-C", "/opt/ov-node"] + list(args),
+                capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+
+        commit = git_cmd("rev-parse", "HEAD")
+        message = git_cmd("log", "-1", "--pretty=%s")
+        date = git_cmd("log", "-1", "--pretty=%cI")
+        branch = git_cmd("rev-parse", "--abbrev-ref", "HEAD")
+
         return ResponseModel(
             success=True,
             msg="Version retrieved",
             data={
-                "commit": commit.hexsha[:7],
-                "message": commit.message.strip(),
-                "date": commit.committed_datetime.isoformat(),
-                "branch": repo.active_branch.name
+                "commit": commit[:7] or "unknown",
+                "message": message,
+                "date": date,
+                "branch": branch,
             }
         )
     except Exception as e:
@@ -147,12 +157,14 @@ async def get_version(api_key: str = Depends(check_api_key)):
 async def check_for_updates(api_key: str = Depends(check_api_key)):
     """Check if updates are available"""
     try:
-        import git
+        import subprocess as sp
         import urllib.request
         import json
 
-        repo = git.Repo("/opt/ov-node")
-        local_commit = repo.head.commit.hexsha
+        local_commit = sp.run(
+            ["git", "-C", "/opt/ov-node", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip()
 
         # Fetch latest commit from GitHub API
         url = "https://api.github.com/repos/primeZdev/ov-node/commits/main"

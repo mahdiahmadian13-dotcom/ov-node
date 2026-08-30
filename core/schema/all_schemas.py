@@ -6,7 +6,7 @@ class User(BaseModel):
     name: str
     password: str = ""
     max_devices: int = 1
-    status: str = "activate"
+    status: str = ""  # "activate"/"deactivate"; empty = no change
 
 
 class ResponseModel(BaseModel):

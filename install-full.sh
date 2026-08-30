@@ -85,54 +85,16 @@ install_dependencies() {
 # Step 2: Install Latest OpenVPN
 #=============================================================
 install_openvpn() {
-    log_step "Installing latest OpenVPN..."
+    log_step "Checking OpenVPN availability..."
+    # The actual OpenVPN package is installed by Nyr's script in setup_openvpn_server().
+    # Here we just verify base requirements.
+    apt install -y gnupg2 lsb-release >/dev/null 2>&1 || true
 
-    # Check if OpenVPN is already installed
     if command -v openvpn &> /dev/null; then
-        CURRENT_VERSION=$(openvpn --version | head -1 | awk '{print $2}')
-        log_warn "OpenVPN already installed (version: $CURRENT_VERSION)"
-        read -p "Do you want to reinstall/update? (y/N): " REINSTALL
-        if [ "$REINSTALL" != "y" ] && [ "$REINSTALL" != "Y" ]; then
-            log_info "Skipping OpenVPN installation"
-            return
-        fi
-    fi
-
-    # Install from official OpenVPN repository
-    if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
-        # Add OpenVPN repository
-        apt install -y gnupg2
-
-        # Get Ubuntu codename
-        if [ "$OS" = "ubuntu" ]; then
-            CODENAME=$(lsb_release -cs)
-        else
-            CODENAME="bookworm"
-        fi
-
-        # Add OpenVPN APT repository
-        wget -O - https://packages.openvpn.net/packages-repo.gpg.key | apt-key add -
-        echo "deb http://packages.openvpn.net/packages/apt $CODENAME main" > /etc/apt/sources.list.d/openvpn.list
-
-        apt update -y
-        apt install -y openvpn easy-rsa
-
-    elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "fedora" ]; then
-        yum install -y epel-release
-        yum install -y openvpn easy-rsa
-
+        CURRENT_VERSION=$(openvpn --version 2>/dev/null | head -1 | awk '{print $2}')
+        log_info "OpenVPN already present (version: ${CURRENT_VERSION:-unknown})"
     else
-        log_error "Unsupported OS: $OS"
-        exit 1
-    fi
-
-    # Verify installation
-    if command -v openvpn &> /dev/null; then
-        NEW_VERSION=$(openvpn --version | head -1 | awk '{print $2}')
-        log_info "OpenVPN installed successfully (version: $NEW_VERSION)"
-    else
-        log_error "OpenVPN installation failed"
-        exit 1
+        log_info "OpenVPN will be installed by the Nyr installer in the next step"
     fi
 }
 
@@ -140,145 +102,57 @@ install_openvpn() {
 # Step 3: Setup OpenVPN Server (if not already configured)
 #=============================================================
 setup_openvpn_server() {
-    log_step "Setting up OpenVPN server..."
+    log_step "Installing OpenVPN via Nyr's script (interactive automation)..."
 
-    # Check if server is already configured
-    if [ -f "${OPENVPN_DIR}/server/server.conf" ]; then
+    if [ -f "/etc/openvpn/server/server.conf" ]; then
         log_warn "OpenVPN server already configured"
-        read -p "Do you want to reconfigure? (y/N): " RECONFIG
+        read -p "Do you want to reconfigure? This will NOT remove existing users (y/N): " RECONFIG
         if [ "$RECONFIG" != "y" ] && [ "$RECONFIG" != "Y" ]; then
-            log_info "Skipping server configuration"
+            log_info "Keeping existing OpenVPN configuration"
             return
         fi
+        # Nyr script handles existing installs: shows management menu. Abort here instead.
+        log_info "Existing install detected - skipping fresh setup"
+        return
     fi
 
-    # Use easy-rsa to setup PKI
-    EASYRSA_DIR="/etc/openvpn/easy-rsa"
+    # Download Nyr's official script
+    wget -4 -q https://git.io/vpn -O /root/openvpn-install.sh || \
+        wget -4 -q https://raw.githubusercontent.com/Nyr/openvpn-install/master/openvpn-install.sh -O /root/openvpn-install.sh
+    chmod +x /root/openvpn-install.sh
 
-    if [ ! -d "$EASYRSA_DIR" ]; then
-        make-cadir "$EASYRSA_DIR"
+    # Drive the installer non-interactively with pexpect (same prompts as ov-node installer.py)
+    log_info "Running Nyr installer (this takes a few minutes)..."
+    python3 << 'PYEOF'
+import pexpect, sys
+
+prompts = [
+    (r"Which IPv4 address should be used.*:", "1"),
+    (r"Protocol.*:", "2"),          # 2 = UDP
+    (r"Port.*:", "1194"),
+    (r"Select a DNS server for the clients.*:", "1"),
+    (r"Enter a name for the first client.*:", "first_client"),
+    (r"Press any key to continue...", ""),
+]
+
+bash = pexpect.spawn("/usr/bin/bash", ["/root/openvpn-install.sh"], encoding="utf-8", timeout=300)
+for pattern, reply in prompts:
+    try:
+        bash.expect(pattern, timeout=15)
+        bash.sendline(reply)
+    except pexpect.TIMEOUT:
+        print(f"[warn] prompt not seen: {pattern}", file=sys.stderr)
+bash.expect(pexpect.EOF, timeout=300)
+bash.close()
+print("Nyr installer finished")
+PYEOF
+
+    if [ ! -f "/etc/openvpn/server/server.conf" ]; then
+        log_error "OpenVPN installation failed (server.conf missing)"
+        exit 1
     fi
 
-    cd "$EASYRSA_DIR"
-
-    # Initialize PKI
-    ./easyrsa --batch init-pki
-
-    # Build CA (non-interactive)
-    ./easyrsa --batch build-ca nopass
-
-    # Generate server certificate
-    ./easyrsa --batch build-server-full server nopass
-
-    # Generate Diffie-Hellman parameters
-    ./easyrsa --batch gen-dh
-
-    # Generate TLS auth key
-    openvpn --genkey secret /etc/openvpn/ta.key
-
-    # Copy certificates
-    cp pki/ca.crt /etc/openvpn/server/
-    cp pki/issued/server.crt /etc/openvpn/server/
-    cp pki/private/server.key /etc/openvpn/server/
-    cp pki/dh.pem /etc/openvpn/server/
-
-    # Get server IP
-    SERVER_IP=$(curl -s ifconfig.me || curl -s ipinfo.io/ip || hostname -I | awk '{print $1}')
-
-    # Create server configuration
-    cat > /etc/openvpn/server/server.conf << EOF
-# OpenVPN Server Configuration
-port 1194
-proto udp
-dev tun
-
-# Certificates
-ca /etc/openvpn/server/ca.crt
-cert /etc/openvpn/server/server.crt
-key /etc/openvpn/server/server.key
-dh /etc/openvpn/server/dh.pem
-tls-auth /etc/openvpn/ta.key 0
-
-# Network
-server 10.8.0.0 255.255.255.0
-ifconfig-pool-persist /var/log/openvpn/ipp.txt
-
-# Push routes
-push "redirect-gateway def1 bypass-dhcp"
-push "dhcp-option DNS 8.8.8.8"
-push "dhcp-option DNS 8.8.4.4"
-
-# Security
-cipher AES-256-GCM
-auth SHA256
-tls-version-min 1.2
-tls-cipher TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384:TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384
-
-# Performance
-keepalive 10 120
-compress lz4-v2
-push "compress lz4-v2"
-
-# Permissions
-persist-key
-persist-tun
-user nobody
-group nogroup
-
-# Logging
-status /var/log/openvpn-status.log
-log-append /var/log/openvpn.log
-verb 3
-mute 20
-max-clients 100
-
-# Client Configuration Directory
-client-config-dir /etc/openvpn/ccd
-
-# Password Authentication (OV-Node)
-auth-user-pass-verify /etc/openvpn/auth.sh via-env
-script-security 2
-
-# Device Limit Enforcement (OV-Node)
-client-connect /etc/openvpn/client-connect.sh
-script-security 2
-EOF
-
-    # Create CCD directory
-    mkdir -p /etc/openvpn/ccd
-
-    # Create log directory
-    mkdir -p /var/log/openvpn
-
-    # Enable IP forwarding
-    echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-openvpn.conf
-    sysctl -p /etc/sysctl.d/99-openvpn.conf
-
-    # Configure firewall
-    if command -v ufw &> /dev/null; then
-        # UFW
-        ufw allow 1194/udp
-        ufw allow 22/tcp
-        # Add NAT rules
-        sed -i '/COMMIT/i -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE' /etc/ufw/before.rules
-        ufw reload
-    else
-        # iptables
-        iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
-        iptables -A INPUT -i tun0 -j ACCEPT
-        iptables -A FORWARD -i tun0 -j ACCEPT
-        iptables -A FORWARD -i tun0 -o eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-        iptables -A FORWARD -i eth0 -o tun0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-        # Save rules
-        iptables-save > /etc/iptables.rules
-    fi
-
-    # Enable OpenVPN service
-    systemctl enable openvpn-server@server
-    systemctl start openvpn-server@server
-
-    log_info "OpenVPN server configured successfully"
-    log_info "Server IP: $SERVER_IP"
+    log_info "OpenVPN server installed successfully"
 }
 
 #=============================================================
@@ -471,8 +345,8 @@ Wants=openvpn-server@server.service
 Type=simple
 User=root
 WorkingDirectory=${OVNODE_DIR}
-Environment="PATH=${OVNODE_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=${PYTHON_PATH} -m uvicorn main:app --host 0.0.0.0 --port 9090
+Environment="PATH=/root/.local/bin:${OVNODE_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/.local/bin/uv run main.py
 Restart=always
 RestartSec=5
 
@@ -494,98 +368,43 @@ EOF
 # Step 7: Create install.sh for OpenVPN users
 #=============================================================
 create_openvpn_install_script() {
-    log_step "Creating OpenVPN user install script..."
+    log_step "Patching OpenVPN server config for OV-Node hooks..."
+    python3 << 'PYEOF'
+import os
 
-    cat > /root/openvpn-install.sh << 'INSTALLEOF'
-#!/bin/bash
-# OpenVPN User Management Script
-# Used by OV-Node to create/delete users
+conf_path = "/etc/openvpn/server/server.conf"
+with open(conf_path) as f:
+    conf = f.read()
 
-case "$1" in
-    add|1)
-        # Add new user
-        if [ -z "$2" ]; then
-            echo "Usage: $0 add <username>"
-            exit 1
-        fi
-        USERNAME="$2"
+hooks = []
+if "auth-user-pass-verify" not in conf:
+    hooks.append("auth-user-pass-verify /etc/openvpn/auth.sh via-env")
+if "client-connect /etc/openvpn/client-connect.sh" not in conf:
+    hooks.append("client-connect /etc/openvpn/client-connect.sh")
+if "script-security 2" not in conf:
+    hooks.append("script-security 2")
+if "status /var/log/openvpn-status.log" not in conf:
+    hooks.append("status /var/log/openvpn-status.log 10")
+if "client-config-dir" not in conf:
+    hooks.append("client-config-dir /etc/openvpn/ccd")
 
-        # Generate client certificate
-        cd /etc/openvpn/easy-rsa
-        ./easyrsa --batch build-client-full "$USERNAME" nopass
+if hooks:
+    with open(conf_path, "a") as f:
+        f.write("\n# OV-Node hooks\n" + "\n".join(hooks) + "\n")
+    print("Added hooks:", hooks)
+else:
+    print("All hooks already present")
+PYEOF
 
-        # Create .ovpn file
-        cat > "/root/${USERNAME}.ovpn" << EOF
-client
-dev tun
-proto udp
-remote $(curl -s ifconfig.me) 1194
-resolv-retry infinite
-nobind
-persist-key
-persist-tun
-remote-cert-tls server
-cipher AES-256-GCM
-auth SHA256
-key-direction 1
-verb 3
+    # Enable ip_forward (Nyr does this too, but be safe)
+    echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn-forward.conf
+    sysctl --system >/dev/null 2>&1 || true
 
-<ca>
-$(cat /etc/openvpn/server/ca.crt)
-</ca>
-<cert>
-$(openssl x509 -in /etc/openvpn/easy-rsa/pki/issued/${USERNAME}.crt)
-</cert>
-<key>
-$(cat /etc/openvpn/easy-rsa/pki/private/${USERNAME}.key)
-</key>
-<tls-auth>
-$(cat /etc/openvpn/ta.key)
-</tls-auth>
-EOF
+    # Restart OpenVPN to load hooks
+    systemctl restart openvpn-server@server 2>/dev/null || \
+        systemctl restart openvpn-server 2>/dev/null || true
 
-        echo "User $USERNAME created successfully"
-        echo "1" # Option number for pexpect
-        ;;
-
-    revoke|2)
-        # Revoke user
-        if [ -z "$2" ]; then
-            # List users and let caller select
-            echo "Select the client to revoke:"
-            cd /etc/openvpn/easy-rsa
-            INDEX=1
-            for cert in pki/issued/*.crt; do
-                NAME=$(basename "$cert" .crt)
-                if [ "$NAME" != "server" ]; then
-                    echo "$INDEX) $NAME"
-                    INDEX=$((INDEX + 1))
-                fi
-            done
-            echo "Client:"
-            read -r SELECTION
-            # Process selection...
-        else
-            USERNAME="$2"
-            cd /etc/openvpn/easy-rsa
-            ./easyrsa --batch revoke "$USERNAME"
-            ./easyrsa --batch gen-crl
-            cp pki/crl.pem /etc/openvpn/server/
-            rm -f "/root/${USERNAME}.ovpn"
-            rm -f "/etc/openvpn/ccd/${USERNAME}"
-            echo "User $USERNAME revoked successfully"
-        fi
-        ;;
-
-    *)
-        echo "Usage: $0 {add|revoke} [username]"
-        exit 1
-        ;;
-esac
-INSTALLEOF
-
-    chmod +x /root/openvpn-install.sh
-    log_info "OpenVPN install script created"
+    log_info "OV-Node hooks installed"
 }
 
 #=============================================================

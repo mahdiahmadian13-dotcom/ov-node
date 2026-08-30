@@ -34,6 +34,15 @@ fi
 
 cd "$OVNODE_DIR"
 
+# Handle tarball deployments without .git: convert to git repo
+if [ ! -d ".git" ]; then
+    log_warn "No git repository found (tarball install). Converting..."
+    git init -q
+    git remote add origin "$REPO_URL" 2>/dev/null || true
+    git fetch origin "$BRANCH" 2>/dev/null
+    git reset --hard "origin/$BRANCH" 2>/dev/null || true
+fi
+
 # Get current version
 CURRENT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 log_info "Current version: $CURRENT_COMMIT"
@@ -78,8 +87,7 @@ log_step "Installing dependencies..."
 if command -v uv &> /dev/null; then
     uv sync
 else
-    source .venv/bin/activate 2>/dev/null || true
-    pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn psutil pydantic-settings pexpect requests
+    pip3 install fastapi uvicorn psutil pydantic-settings pexpect requests colorama python-dotenv
 fi
 log_info "Dependencies updated"
 

@@ -4,6 +4,7 @@ import psutil
 from core.schema.all_schemas import User, ResponseModel, SetSettingsModel, UserConnections
 from core.auth.auth import check_api_key
 from core.service.user_managment import (
+    update_user_on_server,
     create_user_on_server,
     change_user_status as change_user_status_on_server,
     delete_user_on_server,
@@ -112,20 +113,31 @@ async def delete_user(name: str, api_key: str = Depends(check_api_key)):
 
 
 @router.put("/user", response_model=ResponseModel)
-async def change_user_status(user: User, api_key: str = Depends(check_api_key)):
-    # Check device limit before allowing connection
-    if user.status == "activate":
-        max_dev = get_max_devices_config(user.name)
-        check_and_enforce_device_limit(user.name, max_dev)
+async def update_user(user: User, api_key: str = Depends(check_api_key)):
+    """Update user status, password, or max_devices on the node"""
+    updated = False
 
-    result = change_user_status_on_server(user.name, user.status)
-    if result:
+    # Update password / max_devices if provided
+    if user.password or user.max_devices != 1:
+        if update_user_on_server(user.name, user.password, user.max_devices):
+            updated = True
+
+    # Change status if explicitly requested
+    if user.status in ("activate", "deactivate"):
+        if user.status == "activate":
+            max_dev = get_max_devices_config(user.name)
+            check_and_enforce_device_limit(user.name, max_dev)
+        result = change_user_status_on_server(user.name, user.status)
+        if result:
+            updated = True
+
+    if updated:
         return ResponseModel(
             success=True,
-            msg="User status changed successfully",
+            msg="User updated successfully",
             data={"client_name": user.name},
         )
-    return ResponseModel(success=False, msg="Failed to change user status")
+    return ResponseModel(success=False, msg="Failed to update user")
 
 
 @router.get("/download/ovpn/{client_name}")

@@ -11,6 +11,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Detect OS (needed for package removal)
+OS=""
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+fi
+
 OVNODE_DIR="/opt/ov-node"
 OPENVPN_DIR="/etc/openvpn"
 AUTH_SCRIPT="${OPENVPN_DIR}/auth.sh"
@@ -25,6 +32,7 @@ log_error() { echo -e "${RED}[✗]${NC} $1"; }
 # Parse arguments
 REMOVE_OPENVPN=false
 KEEP_DATA=false
+SKIP_CONFIRM=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -37,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             shift
         ;;
         --yes|-y)
-            # Skip confirmation
+            SKIP_CONFIRM=true
             shift
             ;;
         *)
@@ -52,7 +60,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # Confirmation (skip if --yes flag used)
-if [[ "$1" != "--yes" ]] && [[ "$1" != "-y" ]]; then
+if [ "$SKIP_CONFIRM" != true ]; then
     echo -e "${YELLOW}This will remove:${NC}"
     echo "  - OV-Node service and files"
     echo "  - Authentication scripts"
@@ -121,22 +129,39 @@ fi
 if [ "$REMOVE_OPENVPN" = true ]; then
     echo "[6/6] Removing OpenVPN..."
 
-    if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
-        apt remove --purge -y openvpn easy-rsa 2>/dev/null || true
-        apt autoremove -y
-    elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "fedora" ]; then
-        yum remove -y openvpn easy-rsa 2>/dev/null || true
+    # Preferred: use Nyr script's own removal flow (handles CRL, iptables, etc.)
+    if [ -f /root/openvpn-install.sh ] && command -v pexpect >/dev/null 2>&1; then
+        python3 << 'PYEOF' || true
+import pexpect
+bash = pexpect.spawn("bash /root/openvpn-install.sh", encoding="utf-8", timeout=300)
+try:
+    bash.expect(r"Option:|Select an option:", timeout=20)
+    bash.sendline("3")
+    bash.expect(r"Confirm OpenVPN removal", timeout=20)
+    bash.sendline("y")
+    bash.expect(pexpect.EOF, timeout=240)
+    print("Nyr removal flow completed")
+except Exception as e:
+    print(f"Nyr removal failed ({e}), falling back to manual removal", flush=True)
+    raise SystemExit(1)
+PYEOF
     fi
 
-    # Remove OpenVPN directory
-    rm -rf "$OPENVPN_DIR"
-    rm -rf /etc/openvpn
+    # Manual fallback: purge packages and files
+    if [ -d /etc/openvpn ]; then
+        if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
+            apt remove --purge -y openvpn easy-rsa 2>/dev/null || true
+            apt autoremove -y 2>/dev/null || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum remove -y openvpn easy-rsa 2>/dev/null || true
+        fi
+        rm -rf /etc/openvpn
+    fi
 
-    # Remove IP forwarding config
-    rm -f /etc/sysctl.d/99-openvpn.conf
-    sysctl -p 2>/dev/null || true
+    rm -f /root/openvpn-install.sh
+    rm -f /etc/sysctl.d/99-openvpn-forward.conf
+    sysctl --system >/dev/null 2>&1 || true
 
-    # Remove firewall rules (best effort)
     if command -v ufw &> /dev/null; then
         ufw delete allow 1194/udp 2>/dev/null || true
     fi

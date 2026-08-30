@@ -71,8 +71,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
-Environment="PATH=${INSTALL_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=${PYTHON_PATH} -m uvicorn main:app --host 0.0.0.0 --port 9090
+Environment="PATH=/root/.local/bin:${INSTALL_DIR}/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/.local/bin/uv run main.py
 Restart=always
 RestartSec=5
 
