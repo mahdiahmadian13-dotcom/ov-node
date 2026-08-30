@@ -320,7 +320,7 @@ CONNECTEOF
 
     chmod +x "$CONNECT_SCRIPT"
 
-    # Initialize password file
+    # Initialize password file (readable by the OpenVPN daemon user, e.g. nobody)
     touch "$PASSWORD_FILE"
     chmod 600 "$PASSWORD_FILE"
 
@@ -328,6 +328,12 @@ CONNECTEOF
     if [ ! -f "$MAX_DEVICES_FILE" ]; then
         echo '{}' > "$MAX_DEVICES_FILE"
     fi
+
+    # If OpenVPN runs as non-root (Nyr sets 'user nobody'), grant read access
+    if grep -qE "^user +nobody" /etc/openvpn/server/server.conf 2>/dev/null; then
+        chown nobody:nogroup "$PASSWORD_FILE" 2>/dev/null || chown nobody "$PASSWORD_FILE" 2>/dev/null || true
+    fi
+    chmod 644 "$MAX_DEVICES_FILE"
 
     # Create CCD directory (required by client-config-dir hook)
     mkdir -p /etc/openvpn/ccd
@@ -404,6 +410,8 @@ if "status /var/log/openvpn-status.log" not in conf:
     hooks.append("status /var/log/openvpn-status.log 10")
 if "client-config-dir" not in conf:
     hooks.append("client-config-dir /etc/openvpn/ccd")
+if "duplicate-cn" not in conf:
+    hooks.append("duplicate-cn")
 if "data-ciphers-fallback" not in conf:
     hooks.append("data-ciphers-fallback AES-128-GCM")
 

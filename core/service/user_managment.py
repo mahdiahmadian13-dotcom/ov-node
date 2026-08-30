@@ -16,6 +16,34 @@ PASSWORD_FILE = "/etc/openvpn/passwd"
 MAX_DEVICES_FILE = "/etc/openvpn/max_devices.json"
 
 
+def _openvpn_run_user_group():
+    """Resolve the user/group OpenVPN daemon runs as (from server.conf). Defaults to root."""
+    import pwd as _pwd
+    import grp as _grp
+    try:
+        with open("/etc/openvpn/server/server.conf") as f:
+            conf = f.read()
+        m_user = re.search(r"^user\s+(\S+)", conf, re.MULTILINE)
+        m_group = re.search(r"^group\s+(\S+)", conf, re.MULTILINE)
+        user = m_user.group(1) if m_user else None
+        group = m_group.group(1) if m_group else None
+        uid = _pwd.getpwnam(user).pw_uid if user else 0
+        gid = _grp.getgrnam(group).gr_gid if group else 0
+        return uid, gid
+    except Exception:
+        return 0, 0
+
+
+def _grant_daemon_read(path: str) -> None:
+    """Ensure the OpenVPN daemon user can read files it needs (passwd, max_devices)."""
+    try:
+        uid, gid = _openvpn_run_user_group()
+        if uid or gid:
+            os.chown(path, uid, gid)
+    except Exception as e:
+        logger.warning("Could not chown %s: %s", path, e)
+
+
 def create_user_on_server(name, password="", max_devices=1) -> bool:
     try:
         if not os.path.exists(script_path):
@@ -88,8 +116,9 @@ def set_user_password(name: str, password: str) -> bool:
             for username, pwd in users.items():
                 f.write(f"{username}:{pwd}\n")
 
-        # Set proper permissions
+        # Set proper permissions and allow the OpenVPN daemon user to read
         os.chmod(PASSWORD_FILE, 0o600)
+        _grant_daemon_read(PASSWORD_FILE)
         logger.info(f"Password set for user '{name}'")
         return True
     except Exception as e:
@@ -128,6 +157,7 @@ def save_max_devices_config(name: str, max_devices: int) -> bool:
         with open(MAX_DEVICES_FILE, "w") as f:
             json.dump(config, f, indent=2)
 
+        _grant_daemon_read(MAX_DEVICES_FILE)
         logger.info(f"Max devices set to {max_devices} for user '{name}'")
         return True
     except Exception as e:
