@@ -1,41 +1,32 @@
 #!/bin/bash
 # OpenVPN auth-user-pass-verify script
-# This script verifies username/password against /etc/openvpn/passwd
+# Verifies username/password against /etc/openvpn/passwd
 #
-# To enable this script, add to /etc/openvpn/server/server.conf:
-#   auth-user-pass-verify /etc/openvpn/auth.sh via-env
-#   script-security 2
+# Accepts BOTH:
+#   - full node username:  ali-hosdtvds1
+#   - base username:       ali  (matches ali-*)
 #
-# The password file format is:
-#   username:password
+# Password file format:  username:password  (password may contain ':')
 
 PASSWORD_FILE="/etc/openvpn/passwd"
 
-# Check if password file exists
 if [ ! -f "$PASSWORD_FILE" ]; then
-    echo "Password file not found"
     exit 1
 fi
 
-# Get username and password from environment variables
-# OpenVPN passes these via environment when using via-env
 USERNAME="$username"
 PASSWORD="$password"
 
-# If not set via env, try reading from files (via-file mode)
+# via-file fallback
 if [ -z "$USERNAME" ] && [ -f "$1" ]; then
     USERNAME=$(head -1 "$1")
     PASSWORD=$(tail -1 "$1")
 fi
 
-# Validate inputs
 if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
-    echo "Username or password not provided"
     exit 1
 fi
 
-# Check credentials
-# Split stored lines on the FIRST colon only, so passwords may contain ':'
 found=0
 while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -44,15 +35,28 @@ while IFS= read -r line; do
     esac
     stored_user="${line%%:*}"
     stored_pass="${line#*:}"
-    if [ "$USERNAME" = "$stored_user" ] && [ "$PASSWORD" = "$stored_pass" ]; then
+    [ -z "$stored_user" ] && continue
+
+    # password must match first
+    [ "$PASSWORD" = "$stored_pass" ] || continue
+
+    # exact match (client typed full name incl. node suffix)
+    if [ "$USERNAME" = "$stored_user" ]; then
         found=1
         break
     fi
+
+    # base-name match (client typed name without -nodesuffix)
+    case "$stored_user" in
+        "$USERNAME"-*)
+            found=1
+            break
+            ;;
+    esac
 done < "$PASSWORD_FILE"
 
 if [ "$found" = "1" ]; then
     exit 0
 fi
 
-# Credentials don't match
 exit 1
