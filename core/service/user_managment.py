@@ -557,8 +557,8 @@ def _parse_status_file():
                     clients.append(
                         {
                             "common_name": parts[1],
-                            "bytes_received": int(parts[4]),
-                            "bytes_sent": int(parts[5]),
+                            "bytes_received": int(parts[5]),
+                            "bytes_sent": int(parts[6]),
                         }
                     )
                 except ValueError:
